@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ArchLens API Debug</title>
+</head>
+<body>
+    <h1>ArchLens API Debug</h1>
+    <button onclick="testHealth()">Test Health</button>
+    <button onclick="testUpload()">Test Upload</button>
+    <div id="results"></div>
+
+    <script>
+        async function testHealth() {
+            try {
+                const response = await fetch('http://localhost:8000/api/health');
+                const data = await response.json();
+                document.getElementById('results').innerHTML = '<pre>' + JSON.stringify(data, null, 2) + '</pre>';
+            } catch (error) {
+                document.getElementById('results').innerHTML = 'Error: ' + error.message;
+            }
+        }
+
+        async function testUpload() {
+            try {
+                // Create a simple test file
+                const fileContent = `<?xml version="1.0" encoding="UTF-8"?>
+<mxfile><diagram name="Test"><mxGraphModel><root>
+<mxCell id="0"/><mxCell id="1" parent="0"/>
+<mxCell id="2" value="S3 Bucket" style="sketch=0;" vertex="1" parent="1">
+<mxGeometry x="100" y="100" width="78" height="78"/>
+</mxCell>
+</root></mxGraphModel></diagram></mxfile>`;
+                
+                const blob = new Blob([fileContent], { type: 'application/xml' });
+                const file = new File([blob], 'test.xml', { type: 'application/xml' });
+                
+                const formData = new FormData();
+                formData.append('file', file);
+                
+                const response = await fetch('http://localhost:8000/api/analyze', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                document.getElementById('results').innerHTML = '<pre>' + JSON.stringify(data, null, 2) + '</pre>';
+            } catch (error) {
+                document.getElementById('results').innerHTML = 'Upload Error: ' + error.message;
+            }
+        }
+    </script>
+</body>
+</html>

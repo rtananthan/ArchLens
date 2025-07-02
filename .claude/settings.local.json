@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir:*)",
+      "Bash(./scripts/local-dev.sh:*)",
+      "Bash(npm install)",
+      "Bash(chmod:*)",
+      "Bash(./scripts/start-local.sh:*)",
+      "Bash(pkill:*)",
+      "Bash(aws:*)",
+      "Bash(cdk:*)",
+      "Bash(pip install:*)",
+      "Bash(pip3 install:*)",
+      "Bash(python3:*)",
+      "Bash(source:*)",
+      "Bash(npm run build:*)",
+      "Bash(grep:*)",
+      "Bash(cat:*)",
+      "Bash(curl:*)",
+      "Bash(PYTHONPATH=. python3 -c \"import app; app.main()\" --compute)",
+      "Bash(cp:*)",
+      "Bash(ls:*)",
+      "Bash(git init:*)",
+      "Bash(git remote add:*)",
+      "Bash(git branch:*)",
+      "Bash(git add:*)",
+      "Bash(git reset:*)"
+    ],
+    "deny": []
+  }
+}
