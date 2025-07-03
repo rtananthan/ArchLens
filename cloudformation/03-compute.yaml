@@ -1,0 +1,460 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'ArchLens Compute Stack - Lambda functions and API Gateway for processing architecture diagrams'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: 'dev'
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: 'Deployment environment'
+  
+  ProjectName:
+    Type: String
+    Default: 'ArchLens'
+    Description: 'Project name for resource naming'
+
+  LambdaCodeBucket:
+    Type: String
+    Description: 'S3 bucket containing Lambda deployment packages'
+    
+  LambdaCodeKey:
+    Type: String
+    Default: 'lambda/archlens-backend.zip'
+    Description: 'S3 key for Lambda deployment package'
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Environment Configuration"
+        Parameters:
+          - Environment
+          - ProjectName
+      - Label:
+          default: "Lambda Configuration"
+        Parameters:
+          - LambdaCodeBucket
+          - LambdaCodeKey
+    ParameterLabels:
+      Environment:
+        default: "Deployment Environment"
+      ProjectName:
+        default: "Project Name"
+      LambdaCodeBucket:
+        default: "Lambda Code S3 Bucket"
+      LambdaCodeKey:
+        default: "Lambda Code S3 Key"
+
+Resources:
+  # IAM Role for Lambda Functions
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-Lambda-ExecutionRole-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ArchLensLambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # S3 permissions
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource:
+                  - !Sub 
+                    - '${BucketArn}/*'
+                    - BucketArn: 
+                        Fn::ImportValue: !Sub '${ProjectName}-${Environment}-UploadBucketArn'
+              # DynamoDB permissions
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                Resource:
+                  - Fn::ImportValue: !Sub '${ProjectName}-${Environment}-AnalysisTableArn'
+                  - !Sub 
+                    - '${TableArn}/index/*'
+                    - TableArn: 
+                        Fn::ImportValue: !Sub '${ProjectName}-${Environment}-AnalysisTableArn'
+              # Bedrock permissions
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeAgent
+                  - bedrock-agent-runtime:InvokeAgent
+                  - bedrock-runtime:InvokeModel
+                Resource:
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent/*'
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent-alias/*/*'
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/*'
+              # Lambda invoke permissions for async calls
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-Lambda-Execution-Role'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Service
+          Value: compute
+        - Key: IAMResourceType
+          Value: Service-Role
+        - Key: PermissionScope
+          Value: Multi-Service
+        - Key: CostCenter
+          Value: engineering
+        - Key: Owner
+          Value: platform-team
+
+  # Main API Lambda Function
+  APILambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-API-${Environment}'
+      Description: 'Main API handler for ArchLens file upload and analysis'
+      Runtime: python3.11
+      Handler: lightweight_handler.handler
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Ref LambdaCodeKey
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 900  # 15 minutes
+      MemorySize: 1024
+      Environment:
+        Variables:
+          UPLOAD_BUCKET: 
+            Fn::ImportValue: !Sub '${ProjectName}-${Environment}-UploadBucket'
+          ANALYSIS_TABLE: 
+            Fn::ImportValue: !Sub '${ProjectName}-${Environment}-AnalysisTable'
+          BEDROCK_AGENT_ID: 
+            Fn::ImportValue: !Sub '${ProjectName}-${Environment}-BedrockAgentId'
+          BEDROCK_AGENT_ALIAS_ID: 
+            Fn::ImportValue: !Sub '${ProjectName}-${Environment}-BedrockAgentAliasId'
+          ENVIRONMENT: !Ref Environment
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-API-Lambda-Function'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Service
+          Value: compute
+        - Key: Runtime
+          Value: Python-3.11
+        - Key: LambdaType
+          Value: API-Handler
+        - Key: CostCenter
+          Value: engineering
+        - Key: Owner
+          Value: platform-team
+
+  # Background Processor Lambda Function
+  ProcessorLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-Processor-${Environment}'
+      Description: 'Background processor for heavy analysis tasks'
+      Runtime: python3.11
+      Handler: lightweight_processor.handler
+      Code:
+        S3Bucket: !Ref LambdaCodeBucket
+        S3Key: !Ref LambdaCodeKey
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 900  # 15 minutes
+      MemorySize: 2048  # More memory for XML processing
+      Environment:
+        Variables:
+          UPLOAD_BUCKET: 
+            Fn::ImportValue: !Sub '${ProjectName}-${Environment}-UploadBucket'
+          ANALYSIS_TABLE: 
+            Fn::ImportValue: !Sub '${ProjectName}-${Environment}-AnalysisTable'
+          BEDROCK_AGENT_ID: 
+            Fn::ImportValue: !Sub '${ProjectName}-${Environment}-BedrockAgentId'
+          BEDROCK_AGENT_ALIAS_ID: 
+            Fn::ImportValue: !Sub '${ProjectName}-${Environment}-BedrockAgentAliasId'
+          ENVIRONMENT: !Ref Environment
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-Processor-Lambda-Function'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Service
+          Value: compute
+        - Key: Runtime
+          Value: Python-3.11
+        - Key: LambdaType
+          Value: Background-Processor
+        - Key: CostCenter
+          Value: engineering
+        - Key: Owner
+          Value: platform-team
+
+  # API Gateway
+  ArchLensAPI:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub '${ProjectName}-API-${Environment}'
+      Description: !Sub 'ArchLens AWS Architecture Analysis API - ${Environment}'
+      BinaryMediaTypes:
+        - 'multipart/form-data'
+        - 'application/octet-stream'
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-REST-API-Gateway'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Service
+          Value: networking
+        - Key: APIType
+          Value: REST-API
+        - Key: ThrottlingEnabled
+          Value: 'true'
+        - Key: CostCenter
+          Value: engineering
+        - Key: Owner
+          Value: platform-team
+
+  # API Gateway Lambda Permission
+  APIGatewayLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref APILambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub '${ArchLensAPI}/*/POST/*'
+
+  APIGatewayLambdaPermissionGet:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref APILambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub '${ArchLensAPI}/*/GET/*'
+
+  # API Resources
+  APIResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ArchLensAPI
+      ParentId: !GetAtt ArchLensAPI.RootResourceId
+      PathPart: api
+
+  # Health Check Resource
+  HealthResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ArchLensAPI
+      ParentId: !Ref APIResource
+      PathPart: health
+
+  HealthMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ArchLensAPI
+      ResourceId: !Ref HealthResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${APILambda.Arn}/invocations'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseHeaders:
+            Access-Control-Allow-Origin: true
+
+  # Analyze Resource
+  AnalyzeResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ArchLensAPI
+      ParentId: !Ref APIResource
+      PathPart: analyze
+
+  AnalyzeMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ArchLensAPI
+      ResourceId: !Ref AnalyzeResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${APILambda.Arn}/invocations'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseHeaders:
+            Access-Control-Allow-Origin: true
+
+  # Analysis Resource
+  AnalysisResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ArchLensAPI
+      ParentId: !Ref APIResource
+      PathPart: analysis
+
+  AnalysisIdResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ArchLensAPI
+      ParentId: !Ref AnalysisResource
+      PathPart: '{analysis_id}'
+
+  AnalysisIdMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ArchLensAPI
+      ResourceId: !Ref AnalysisIdResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${APILambda.Arn}/invocations'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseHeaders:
+            Access-Control-Allow-Origin: true
+
+  # Status Resource
+  StatusResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref ArchLensAPI
+      ParentId: !Ref AnalysisIdResource
+      PathPart: status
+
+  StatusMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ArchLensAPI
+      ResourceId: !Ref StatusResource
+      HttpMethod: GET
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${APILambda.Arn}/invocations'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseHeaders:
+            Access-Control-Allow-Origin: true
+
+  # CORS Options Methods
+  AnalyzeOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref ArchLensAPI
+      ResourceId: !Ref AnalyzeResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      Integration:
+        Type: MOCK
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Headers: false
+            method.response.header.Access-Control-Allow-Methods: false
+            method.response.header.Access-Control-Allow-Origin: false
+
+  # API Deployment
+  APIDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - HealthMethod
+      - AnalyzeMethod
+      - AnalysisIdMethod
+      - StatusMethod
+      - AnalyzeOptionsMethod
+    Properties:
+      RestApiId: !Ref ArchLensAPI
+      StageName: prod
+      StageDescription: 'Production stage'
+
+  # API Gateway Stage with throttling
+  APIStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref ArchLensAPI
+      DeploymentId: !Ref APIDeployment
+      StageName: prod
+      ThrottleSettings:
+        RateLimit: 100
+        BurstLimit: 200
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          LoggingLevel: INFO
+          DataTraceEnabled: false
+          MetricsEnabled: true
+
+Outputs:
+  APIGatewayURL:
+    Description: 'URL of the API Gateway'
+    Value: !Sub 'https://${ArchLensAPI}.execute-api.${AWS::Region}.amazonaws.com/prod'
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-APIGatewayURL'
+
+  APILambdaArn:
+    Description: 'ARN of the API Lambda function'
+    Value: !GetAtt APILambda.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-APILambdaArn'
+
+  ProcessorLambdaArn:
+    Description: 'ARN of the Processor Lambda function'
+    Value: !GetAtt ProcessorLambda.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-ProcessorLambdaArn'
+
+  LambdaExecutionRoleArn:
+    Description: 'ARN of the Lambda execution role'
+    Value: !GetAtt LambdaExecutionRole.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-LambdaExecutionRoleArn'
+
+  StackName:
+    Description: 'Name of this CloudFormation stack'
+    Value: !Ref 'AWS::StackName'
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-ComputeStackName'

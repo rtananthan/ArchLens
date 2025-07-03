@@ -1,47 +1,72 @@
+# ArchLens Infrastructure - Compute Stack
+# This CDK stack defines the serverless compute layer for ArchLens.
+# It creates Lambda functions, API Gateway, and IAM roles for the backend processing.
+
+# AWS CDK imports for infrastructure components
 from aws_cdk import (
-    Stack,
-    aws_lambda as _lambda,
-    aws_apigateway as apigateway,
-    aws_iam as iam,
-    Duration,
-    Tags,
-    BundlingOptions
+    Stack,                           # Base stack class
+    aws_lambda as _lambda,           # Lambda functions for serverless compute
+    aws_apigateway as apigateway,    # REST API for frontend-backend communication
+    aws_iam as iam,                  # Identity and Access Management for security
+    Duration,                        # Time duration utilities
+    Tags,                           # Resource tagging for cost allocation
+    BundlingOptions                 # Lambda deployment packaging options
 )
-from constructs import Construct
+from constructs import Construct    # CDK construct base class
+
+# Python path manipulation to import custom configuration
 import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config.tags import get_service_specific_tags, validate_tags
+from config.tags import get_service_specific_tags, validate_tags  # Custom tagging utilities
 
 class ComputeStack(Stack):
+    """
+    Compute Stack - Serverless backend processing layer.
+    
+    This stack creates the compute infrastructure for ArchLens:
+    - Lambda functions for API handling and background processing
+    - API Gateway for REST API endpoints
+    - IAM roles with least-privilege permissions
+    - Integration with Storage and AI stacks
+    
+    Dependencies:
+    - StorageStack: Provides S3 bucket and DynamoDB table references
+    - AIStack: Provides Bedrock agent ID for AI analysis
+    """
     
     def __init__(self, scope: Construct, construct_id: str, storage_stack, ai_stack, environment: str = 'dev', **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
         
-        self.storage_stack = storage_stack
-        self.ai_stack = ai_stack
-        self.deployment_env = environment
+        # Store references to dependent stacks for resource access
+        self.storage_stack = storage_stack  # For S3 bucket and DynamoDB table ARNs
+        self.ai_stack = ai_stack           # For Bedrock agent ID
+        self.deployment_env = environment   # Environment tag (dev/staging/prod)
         
-        # Lambda execution role
+        # Step 1: Create IAM role for Lambda functions
+        # This role defines what AWS services the Lambda functions can access
         lambda_role = iam.Role(
             self, 'LambdaExecutionRole',
-            assumed_by=iam.ServicePrincipal('lambda.amazonaws.com'),
+            assumed_by=iam.ServicePrincipal('lambda.amazonaws.com'),  # Allow Lambda service to assume this role
             managed_policies=[
+                # AWS-managed policy for basic Lambda logging to CloudWatch
                 iam.ManagedPolicy.from_aws_managed_policy_name('service-role/AWSLambdaBasicExecutionRole')
             ],
+            # Custom inline policy with specific permissions for ArchLens functionality
             inline_policies={
                 'ArchLensLambdaPolicy': iam.PolicyDocument(
                     statements=[
-                        # S3 permissions
+                        # S3 permissions - for file storage and retrieval
+                        # Lambda functions need to store uploaded files and read them for processing
                         iam.PolicyStatement(
                             effect=iam.Effect.ALLOW,
                             actions=[
-                                's3:GetObject',
-                                's3:PutObject',
-                                's3:DeleteObject'
+                                's3:GetObject',    # Read uploaded files
+                                's3:PutObject',    # Store new files
+                                's3:DeleteObject'  # Clean up temporary files
                             ],
                             resources=[
-                                f'{storage_stack.upload_bucket.bucket_arn}/*'
+                                f'{storage_stack.upload_bucket.bucket_arn}/*'  # Only access files in upload bucket
                             ]
                         ),
                         # DynamoDB permissions

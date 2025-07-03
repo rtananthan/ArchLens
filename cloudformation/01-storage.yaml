@@ -1,0 +1,171 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'ArchLens Storage Stack - S3 buckets and DynamoDB table for AWS architecture analysis'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: 'dev'
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: 'Deployment environment'
+  
+  ProjectName:
+    Type: String
+    Default: 'ArchLens'
+    Description: 'Project name for resource naming'
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Environment Configuration"
+        Parameters:
+          - Environment
+          - ProjectName
+    ParameterLabels:
+      Environment:
+        default: "Deployment Environment"
+      ProjectName:
+        default: "Project Name"
+
+Resources:
+  # S3 Bucket for uploaded files
+  UploadBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'archlens-uploads-${AWS::AccountId}-${AWS::Region}'
+      VersioningConfiguration:
+        Status: Suspended
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: 'delete-incomplete-uploads'
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+          - Id: 'delete-old-files'
+            Status: Enabled
+            ExpirationInDays: 2
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - '*'
+            AllowedMethods:
+              - GET
+              - POST
+              - PUT
+              - DELETE
+              - HEAD
+            AllowedOrigins:
+              - '*'
+            ExposedHeaders:
+              - ETag
+            MaxAge: 3600
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-Upload-Storage-Bucket'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Service
+          Value: storage
+        - Key: DataType
+          Value: User-Uploads
+        - Key: RetentionPeriod
+          Value: 48hours
+        - Key: CostCenter
+          Value: engineering
+        - Key: Owner
+          Value: platform-team
+
+  # DynamoDB Table for analysis results
+  AnalysisTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'ArchLens-Analysis-${AWS::Region}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: analysis_id
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: analysis_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: status-timestamp-index
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-Analysis-Results-Table'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Service
+          Value: storage
+        - Key: DataType
+          Value: Analysis-Results
+        - Key: BillingMode
+          Value: OnDemand
+        - Key: CostCenter
+          Value: engineering
+        - Key: Owner
+          Value: platform-team
+
+Outputs:
+  UploadBucketName:
+    Description: 'Name of the S3 bucket for file uploads'
+    Value: !Ref UploadBucket
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-UploadBucket'
+
+  UploadBucketArn:
+    Description: 'ARN of the S3 bucket for file uploads'
+    Value: !GetAtt UploadBucket.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-UploadBucketArn'
+
+  AnalysisTableName:
+    Description: 'Name of the DynamoDB table for analysis results'
+    Value: !Ref AnalysisTable
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-AnalysisTable'
+
+  AnalysisTableArn:
+    Description: 'ARN of the DynamoDB table for analysis results'
+    Value: !GetAtt AnalysisTable.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-AnalysisTableArn'
+
+  StackName:
+    Description: 'Name of this CloudFormation stack'
+    Value: !Ref 'AWS::StackName'
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-StorageStackName'

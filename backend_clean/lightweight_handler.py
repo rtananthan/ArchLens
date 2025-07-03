@@ -1,5 +1,9 @@
+# ArchLens Backend - Lightweight Lambda Handler
+# This file contains the main API handler for processing architecture diagram uploads
+# and coordinating with Amazon Bedrock for AI-powered security analysis.
+
+# Standard library imports for JSON processing, file handling, and data types
 import json
-import boto3
 import os
 import base64
 import xml.etree.ElementTree as ET
@@ -8,47 +12,83 @@ from typing import Dict, Any
 from datetime import datetime, timezone
 from decimal import Decimal
 
+# AWS SDK for interacting with S3, DynamoDB, and Bedrock services
+import boto3
+
 class DecimalEncoder(json.JSONEncoder):
+    """
+    Custom JSON encoder to handle DynamoDB Decimal types.
+    
+    DynamoDB stores numbers as Decimal objects to maintain precision,
+    but JSON serialization requires conversion to float for frontend consumption.
+    This encoder automatically converts Decimal objects to floats during JSON serialization.
+    """
     def default(self, o):
         if isinstance(o, Decimal):
-            return float(o)
+            return float(o)  # Convert Decimal to float for JSON serialization
         return super(DecimalEncoder, self).default(o)
 
 def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     """
-    Lightweight Lambda handler for ArchLens API with real Bedrock integration
+    Main Lambda handler function - Entry point for all API requests.
+    
+    This function serves as the central router for the ArchLens API, handling:
+    - Health checks for system monitoring
+    - File uploads for architecture analysis
+    - Results retrieval for completed analyses
+    
+    Args:
+        event: API Gateway event containing request data (headers, body, path, method)
+        context: Lambda runtime context (timeout, memory, request ID)
+        
+    Returns:
+        Dict containing HTTP response with status code, headers, and JSON body
+        
+    Architecture Flow:
+    1. Parse incoming HTTP request (method, path, headers)
+    2. Route to appropriate handler function
+    3. Process request and interact with AWS services
+    4. Return standardized JSON response with CORS headers
     """
-    print(f"Event: {json.dumps(event)}")
+    # Log the incoming event for debugging (sanitized in production)
+    print(f"Incoming API request: {json.dumps(event, default=str)}")
     
-    # Get the HTTP method and path
-    http_method = event.get('httpMethod', 'GET')
-    path = event.get('path', '/')
+    # Extract HTTP method and path from API Gateway event
+    # These determine which handler function to call
+    http_method = event.get('httpMethod', 'GET')  # GET, POST, OPTIONS, etc.
+    path = event.get('path', '/')                 # /api/health, /api/analyze, etc.
     
-    # CORS headers
+    # CORS (Cross-Origin Resource Sharing) headers for browser compatibility
+    # These headers allow the frontend (running on CloudFront) to call this API
     cors_headers = {
-        'Content-Type': 'application/json',
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+        'Content-Type': 'application/json',                               # Always return JSON
+        'Access-Control-Allow-Origin': '*',                             # Allow all origins (can be restricted to CloudFront domain)
+        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',           # Supported HTTP methods
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization'   # Headers the browser can send
     }
     
-    # Handle CORS preflight requests
+    # Handle CORS preflight requests (sent by browsers before actual requests)
+    # When a browser makes a cross-origin request, it first sends an OPTIONS request
+    # to check if the actual request is allowed. We respond with allowed methods/headers.
     if http_method == 'OPTIONS':
         return {
             'statusCode': 200,
             'headers': cors_headers,
-            'body': ''
+            'body': ''  # Empty body for preflight response
         }
     
-    # Environment variables
-    UPLOAD_BUCKET = os.environ.get('UPLOAD_BUCKET')
-    ANALYSIS_TABLE = os.environ.get('ANALYSIS_TABLE')
-    BEDROCK_AGENT_ID = os.environ.get('BEDROCK_AGENT_ID')
-    BEDROCK_AGENT_ALIAS_ID = os.environ.get('BEDROCK_AGENT_ALIAS_ID', 'TSTALIASID')
-    AWS_REGION = os.environ.get('AWS_REGION', 'ap-southeast-2')
+    # Load AWS resource identifiers from environment variables
+    # These are set by CloudFormation/CDK during deployment and vary by environment
+    UPLOAD_BUCKET = os.environ.get('UPLOAD_BUCKET')                    # S3 bucket for uploaded files
+    ANALYSIS_TABLE = os.environ.get('ANALYSIS_TABLE')                  # DynamoDB table for storing results
+    BEDROCK_AGENT_ID = os.environ.get('BEDROCK_AGENT_ID')              # AI agent for architecture analysis
+    BEDROCK_AGENT_ALIAS_ID = os.environ.get('BEDROCK_AGENT_ALIAS_ID', 'TSTALIASID')  # Agent version/alias
+    AWS_REGION = os.environ.get('AWS_REGION', 'ap-southeast-2')        # AWS region for service calls
     
     try:
-        # Health check endpoint
+        # Route: GET /api/health - System health check endpoint
+        # Used by monitoring systems and load balancers to verify the service is running
+        # Returns configuration info and service status
         if path == '/api/health' and http_method == 'GET':
             return {
                 'statusCode': 200,
@@ -67,15 +107,20 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 })
             }
         
-        # File upload and analysis endpoint
+        # Route: POST /api/analyze - File upload and analysis endpoint
+        # This is the main endpoint where users upload draw.io files for AI analysis
+        # Handles multipart form data, stores files in S3, and triggers Bedrock analysis
         elif path == '/api/analyze' and http_method == 'POST':
             return handle_file_upload(event, UPLOAD_BUCKET, ANALYSIS_TABLE, BEDROCK_AGENT_ID, BEDROCK_AGENT_ALIAS_ID, AWS_REGION, cors_headers)
         
-        # Get analysis results
+        # Route: GET /api/analysis/{id} - Retrieve analysis results
+        # Returns completed analysis results from DynamoDB
+        # Also handles /api/analysis/{id}/status for progress checking
         elif path.startswith('/api/analysis/') and http_method == 'GET':
             return handle_get_analysis(event, ANALYSIS_TABLE, AWS_REGION, cors_headers)
         
-        # Default response
+        # Default response for unrecognized routes
+        # Returns 404 Not Found with details about the attempted request
         return {
             'statusCode': 404,
             'headers': cors_headers,
@@ -88,70 +133,107 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         }
         
     except Exception as e:
-        print(f"Error handling request: {str(e)}")
+        # Global error handler - catches any unhandled exceptions
+        # Logs the error for debugging and returns a user-friendly error response
+        print(f"Unhandled error in main handler: {str(e)}")
         return {
             'statusCode': 500,
             'headers': cors_headers,
             'body': json.dumps({
                 'error': 'Internal Server Error',
-                'message': str(e)
+                'message': str(e)  # In production, this might be sanitized
             })
         }
 
 def handle_file_upload(event, upload_bucket, analysis_table, bedrock_agent_id, bedrock_agent_alias_id, aws_region, cors_headers):
-    """Handle file upload and start analysis"""
+    """
+    Handle file upload and architecture analysis workflow.
     
-    # Parse multipart form data
+    This function processes uploaded draw.io files through the complete analysis pipeline:
+    1. Parse multipart form data from the browser
+    2. Extract and validate the XML file content
+    3. Store the file in S3 for processing
+    4. Parse architecture components from the XML
+    5. Send to Amazon Bedrock for AI security analysis
+    6. Store results in DynamoDB
+    7. Return analysis ID and initial results to the frontend
+    
+    Args:
+        event: API Gateway event containing the uploaded file data
+        upload_bucket: S3 bucket name for file storage
+        analysis_table: DynamoDB table name for results
+        bedrock_agent_id: Amazon Bedrock agent identifier for AI analysis
+        bedrock_agent_alias_id: Bedrock agent alias for versioning
+        aws_region: AWS region for service calls
+        cors_headers: HTTP headers for browser compatibility
+        
+    Returns:
+        HTTP response with analysis ID and initial results
+    """
+    
+    # Step 1: Extract and decode the request body
+    # API Gateway can send data either as plain text or base64-encoded
     body = event.get('body', '')
     if event.get('isBase64Encoded', False):
+        # Binary data (like file uploads) comes base64-encoded
         body = base64.b64decode(body)
     else:
+        # Text data comes as string, convert to bytes for consistent processing
         body = body.encode('utf-8') if isinstance(body, str) else body
     
-    # Extract file content from multipart data
-    file_content = None
-    file_name = "uploaded_file.drawio"
+    # Step 2: Initialize variables for file extraction
+    file_content = None                    # Will hold the actual XML content
+    file_name = "uploaded_file.drawio"     # Default filename if not found in form data
     
     try:
-        # Parse multipart form data manually
+        # Step 3: Parse multipart form data manually
+        # Note: In production, consider using a proper multipart parser library
+        # This simplified parser works for standard browser file uploads
         if body:
+            # Convert bytes to string, ignoring invalid UTF-8 characters
             body_str = body.decode('utf-8', errors='ignore')
             
-            # Look for file content in multipart data
-            # This is a simple parser - for production, use a proper multipart parser
+            # Step 4: Extract filename from multipart headers
+            # Multipart form data includes headers like: Content-Disposition: form-data; name="file"; filename="architecture.drawio"
             if 'filename=' in body_str:
-                # Extract filename
-                filename_start = body_str.find('filename="') + 10
-                filename_end = body_str.find('"', filename_start)
+                # Find the filename parameter in the Content-Disposition header
+                filename_start = body_str.find('filename="') + 10  # Skip 'filename="'
+                filename_end = body_str.find('"', filename_start)   # Find closing quote
                 if filename_end > filename_start:
                     file_name = body_str[filename_start:filename_end]
             
-            # Look for XML content (draw.io files contain XML)
+            # Step 5: Extract XML content from multipart data
+            # Draw.io files are XML documents that start with <?xml declaration
             if '<?xml' in body_str:
                 xml_start = body_str.find('<?xml')
-                # Find the end of the XML content by looking for the closing tag or boundary
+                # Find the end of the XML content by looking for closing tags or boundaries
                 xml_end = len(body_str)
                 
-                # Look for the proper XML ending
+                # Method 1: Look for the proper XML ending tag
+                # Draw.io files typically end with </mxfile>
                 if '</mxfile>' in body_str:
                     mxfile_end = body_str.find('</mxfile>', xml_start) + len('</mxfile>')
                     xml_end = min(xml_end, mxfile_end)
                 
-                # Also look for boundary markers
+                # Method 2: Look for multipart boundary markers that indicate end of file content
+                # Multipart boundaries separate different parts of the form data
                 for boundary_marker in ['\r\n--', '\n--']:
                     marker_pos = body_str.find(boundary_marker, xml_start)
                     if marker_pos > xml_start:
                         xml_end = min(xml_end, marker_pos)
                         break
                 
+                # Extract the clean XML content
                 file_content = body_str[xml_start:xml_end].strip()
                 
-                # Clean up any remaining multipart artifacts
+                # Clean up any remaining multipart artifacts that might have been included
                 if file_content.endswith('EOF < /dev/null'):
                     file_content = file_content.replace('EOF < /dev/null', '').strip()
         
-        # If no valid XML content found, create a fallback response
+        # Step 6: Validate extracted file content
+        # If no valid XML content found, return appropriate error messages
         if not file_content or '<?xml' not in file_content:
+            # Check file extension first - helps users understand file type requirements
             if not file_name.endswith(('.xml', '.drawio')):
                 return {
                     'statusCode': 400,
@@ -162,7 +244,8 @@ def handle_file_upload(event, upload_bucket, analysis_table, bedrock_agent_id, b
                     })
                 }
             
-            # If file was uploaded but we can't parse it, provide helpful feedback
+            # File has correct extension but we couldn't extract XML content
+            # This might happen with corrupted files or unsupported formats
             return {
                 'statusCode': 400,
                 'headers': cors_headers,
@@ -173,6 +256,7 @@ def handle_file_upload(event, upload_bucket, analysis_table, bedrock_agent_id, b
             }
         
     except Exception as parse_error:
+        # Handle any errors during file parsing (network issues, malformed data, etc.)
         print(f"File parsing error: {str(parse_error)}")
         return {
             'statusCode': 400,
@@ -183,34 +267,41 @@ def handle_file_upload(event, upload_bucket, analysis_table, bedrock_agent_id, b
             })
         }
     
+    # Step 7: Generate unique analysis ID for tracking this request
+    # Format: analysis_12345678 (8 random hex characters for uniqueness)
     analysis_id = f"analysis_{uuid4().hex[:8]}"
     
-    # Initialize AWS clients
-    s3_client = boto3.client('s3', region_name=aws_region)
-    dynamodb = boto3.resource('dynamodb', region_name=aws_region)
-    bedrock_agent_client = boto3.client('bedrock-agent-runtime', region_name=aws_region)
+    # Step 8: Initialize AWS service clients
+    # These clients handle communication with different AWS services
+    s3_client = boto3.client('s3', region_name=aws_region)                           # For file storage
+    dynamodb = boto3.resource('dynamodb', region_name=aws_region)                    # For results storage
+    bedrock_agent_client = boto3.client('bedrock-agent-runtime', region_name=aws_region)  # For AI analysis
     
     try:
+        # Step 9: Create timestamp for tracking and TTL
         timestamp = datetime.now(timezone.utc).isoformat()
         
-        # Upload actual file content to S3
-        s3_key = f"uploads/{analysis_id}/{file_name}"
+        # Step 10: Store file in S3 for audit trail and potential reprocessing
+        # Files are organized by analysis ID for easy cleanup and management
+        s3_key = f"uploads/{analysis_id}/{file_name}"  # Path: uploads/analysis_12345678/architecture.drawio
         s3_client.put_object(
             Bucket=upload_bucket,
             Key=s3_key,
-            Body=file_content.encode('utf-8'),
-            ContentType='application/xml',
-            Metadata={
+            Body=file_content.encode('utf-8'),    # Convert string to bytes for S3 storage
+            ContentType='application/xml',        # Proper MIME type for XML files
+            Metadata={                            # Custom metadata for tracking
                 'original-filename': file_name,
                 'upload-timestamp': timestamp,
                 'analysis-id': analysis_id
             }
         )
         
-        # Parse the uploaded XML to extract architecture information
+        # Step 11: Parse XML to extract architecture components
+        # This identifies AWS services and their relationships from the diagram
         architecture_info = parse_uploaded_xml(file_content)
         
-        # Call Bedrock agent for analysis with actual file content
+        # Step 12: Send to Amazon Bedrock for AI-powered security analysis
+        # This is where the actual AI analysis happens using Claude 3.5 Sonnet
         bedrock_response = call_bedrock_agent(
             bedrock_agent_client, 
             bedrock_agent_id, 
@@ -381,66 +472,114 @@ def handle_get_analysis(event, analysis_table, aws_region, cors_headers):
         }
 
 def parse_uploaded_xml(xml_content):
-    """Parse uploaded draw.io XML and extract architecture components"""
+    """
+    Parse draw.io XML content to extract AWS architecture components.
+    
+    Draw.io files use a specific XML structure where architectural components
+    are stored as mxCell elements with various properties. This function:
+    1. Parses the XML using Python's ElementTree
+    2. Extracts all mxCell elements (components and connections)
+    3. Identifies AWS service types based on component names/styles
+    4. Maps relationships between components
+    5. Returns structured data for AI analysis
+    
+    Args:
+        xml_content: Raw XML string from uploaded draw.io file
+        
+    Returns:
+        Dict containing:
+        - components: List of AWS services found in the diagram
+        - connections: List of relationships between components
+        - metadata: Counts and validation flags
+    """
     
     try:
+        # Parse XML string into ElementTree object for structured access
         root = ET.fromstring(xml_content)
-        components = []
-        connections = []
+        components = []    # Will store AWS service components (EC2, RDS, S3, etc.)
+        connections = []   # Will store relationships between components (arrows, lines)
         
-        # Find all mxCell elements
+        # Iterate through all mxCell elements in the draw.io XML
+        # mxCell is the fundamental building block in draw.io's data model
         for cell in root.iter('mxCell'):
-            cell_id = cell.get('id')
-            value = cell.get('value', '')
-            style = cell.get('style', '')
+            cell_id = cell.get('id')      # Unique identifier for this cell
+            value = cell.get('value', '') # The text/label shown on the component
+            style = cell.get('style', '') # CSS-like styling information
             
-            if value and cell_id not in ['0', '1']:  # Skip root cells
-                # Try to identify AWS service types
+            # Process component cells (skip root cells 0 and 1 which are containers)
+            if value and cell_id not in ['0', '1']:
+                # Use the component name and style to identify what AWS service this represents
                 service_type = identify_aws_service_type(value, style)
                 
+                # Store component information for AI analysis
                 components.append({
-                    'id': cell_id,
-                    'name': value,
-                    'service_type': service_type,
-                    'style': style
+                    'id': cell_id,              # For tracking relationships
+                    'name': value,              # User-provided component name
+                    'service_type': service_type, # Identified AWS service type
+                    'style': style              # Visual styling (may contain service hints)
                 })
             
-            # Check for connections (edges)
-            source = cell.get('source')
-            target = cell.get('target')
+            # Process connection cells (arrows, lines between components)
+            # These represent data flow, dependencies, or communication paths
+            source = cell.get('source')  # ID of the component this connection starts from
+            target = cell.get('target')  # ID of the component this connection goes to
             if source and target:
                 connections.append({
                     'source': source,
                     'target': target,
-                    'type': 'connection'
+                    'type': 'connection'  # Could be extended to support different connection types
                 })
         
+        # Return structured architecture information for AI analysis
         return {
-            'components': components,
-            'connections': connections,
-            'component_count': len(components),
-            'connection_count': len(connections),
-            'has_content': len(components) > 0
+            'components': components,                    # List of AWS services found
+            'connections': connections,                  # List of relationships between services
+            'component_count': len(components),          # Total number of components (for analysis)
+            'connection_count': len(connections),        # Total number of connections (for complexity assessment)
+            'has_content': len(components) > 0          # Flag indicating if diagram has actual content
         }
         
     except Exception as e:
+        # Handle XML parsing errors gracefully (malformed XML, encoding issues, etc.)
         print(f"XML parsing error: {str(e)}")
         return {
-            'components': [],
-            'connections': [],
-            'component_count': 0,
-            'connection_count': 0,
-            'has_content': False,
-            'parse_error': str(e)
+            'components': [],           # Empty list for failed parsing
+            'connections': [],          # Empty list for failed parsing
+            'component_count': 0,       # Zero count indicates parsing failure
+            'connection_count': 0,      # Zero count indicates parsing failure
+            'has_content': False,       # Flag indicates no valid content found
+            'parse_error': str(e)       # Store error for debugging
         }
 
 def identify_aws_service_type(value, style):
-    """Identify AWS service type based on component name and style"""
+    """
+    Identify AWS service type from component name and styling information.
     
+    This function uses pattern matching to classify draw.io components into
+    AWS service categories. It examines both the component's display name
+    and its styling properties to make intelligent guesses about what
+    AWS service the component represents.
+    
+    Common patterns:
+    - Text matching: "Load Balancer" → Load Balancer
+    - Abbreviations: "ALB" → Load Balancer
+    - Generic terms: "Database" → RDS
+    - Style hints: AWS-specific styling → AWS Service
+    
+    Args:
+        value: The display text/label of the component
+        style: CSS-like styling string that may contain service hints
+        
+    Returns:
+        String representing the identified AWS service type
+    """
+    
+    # Convert to lowercase for case-insensitive matching
     value_lower = value.lower()
     style_lower = style.lower()
     
-    # Common AWS service patterns
+    # Pattern matching for common AWS services
+    # Each section checks for service-specific keywords in component names
     if any(keyword in value_lower for keyword in ['load balancer', 'alb', 'elb', 'nlb']):
         return 'Load Balancer'
     elif any(keyword in value_lower for keyword in ['ec2', 'instance', 'server']):
@@ -469,13 +608,39 @@ def identify_aws_service_type(value, style):
         return 'Unknown'
 
 def call_bedrock_agent(bedrock_agent_client, agent_id, agent_alias_id, xml_content, session_id, architecture_info=None):
-    """Call Amazon Bedrock agent for architecture analysis with retry logic for throttling"""
+    """
+    Call Amazon Bedrock agent for AI-powered architecture security analysis.
     
+    This function handles the core AI integration with Amazon Bedrock's Claude 3.5 Sonnet model.
+    It includes sophisticated retry logic to handle quota limitations and throttling,
+    which is critical since new AWS accounts have very low Bedrock quotas (1 request/minute).
+    
+    The function:
+    1. Prepares a structured prompt with architecture details
+    2. Calls the Bedrock agent with retry logic
+    3. Handles throttling, permission errors, and other failures
+    4. Parses the AI response into structured JSON
+    5. Returns analysis results or fallback responses
+    
+    Args:
+        bedrock_agent_client: Boto3 client for Bedrock agent runtime
+        agent_id: Unique identifier for the Bedrock agent
+        agent_alias_id: Agent version/alias identifier
+        xml_content: Raw XML content (not currently used in prompt)
+        session_id: Unique session ID for tracking conversations
+        architecture_info: Parsed component information from draw.io file
+        
+    Returns:
+        Dict containing analysis results, security scores, and recommendations
+    """
+    
+    # Import time utilities for retry logic
     import time
     import random
     
-    max_retries = 1  # Single retry to avoid timeout
-    base_delay = 10  # Shorter delay to stay under API Gateway timeout
+    # Retry configuration optimized for API Gateway timeout limits
+    max_retries = 1   # Limited retries to stay under 29-second API Gateway timeout
+    base_delay = 10   # Base delay in seconds between retries
     
     for attempt in range(max_retries + 1):
         try:

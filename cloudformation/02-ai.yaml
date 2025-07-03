@@ -1,0 +1,197 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'ArchLens AI Stack - Amazon Bedrock agent for AWS architecture security analysis'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: 'dev'
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: 'Deployment environment'
+  
+  ProjectName:
+    Type: String
+    Default: 'ArchLens'
+    Description: 'Project name for resource naming'
+
+  BedrockModelId:
+    Type: String
+    Default: 'anthropic.claude-3-5-sonnet-20241022-v2:0'
+    Description: 'Bedrock model ID for the agent'
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Environment Configuration"
+        Parameters:
+          - Environment
+          - ProjectName
+      - Label:
+          default: "AI Configuration"
+        Parameters:
+          - BedrockModelId
+    ParameterLabels:
+      Environment:
+        default: "Deployment Environment"
+      ProjectName:
+        default: "Project Name"
+      BedrockModelId:
+        default: "Bedrock Foundation Model"
+
+Resources:
+  # IAM Role for Bedrock Agent
+  BedrockAgentRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-BedrockAgent-Role-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonBedrockFullAccess
+      Policies:
+        - PolicyName: BedrockAgentPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:GetFoundationModel
+                  - bedrock:ListFoundationModels
+                Resource: 
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/*'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock/*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-BedrockAgent-Role'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Service
+          Value: ai
+        - Key: IAMResourceType
+          Value: Service-Role
+        - Key: CostCenter
+          Value: engineering
+        - Key: Owner
+          Value: platform-team
+
+  # Bedrock Agent for Security Analysis
+  SecurityAnalysisAgent:
+    Type: AWS::Bedrock::Agent
+    Properties:
+      AgentName: !Sub '${ProjectName}-SecurityAnalysis-${Environment}'
+      Description: 'AI agent for analyzing AWS architecture security and compliance'
+      FoundationModel: !Ref BedrockModelId
+      AgentResourceRoleArn: !GetAtt BedrockAgentRole.Arn
+      Instruction: |
+        You are an AWS architecture security expert. Your role is to analyze uploaded draw.io architecture diagrams and provide comprehensive security assessments.
+
+        ## Your Expertise:
+        - AWS Well-Architected Framework Security Pillar
+        - Cloud security best practices
+        - Network security architecture
+        - Data protection and encryption
+        - Identity and access management
+        - Compliance frameworks (SOC 2, ISO 27001, PCI DSS)
+
+        ## Analysis Tasks:
+        1. **Security Score**: Provide an overall security score (1-10) based on the architecture
+        2. **Component Analysis**: Identify security risks for each AWS service in the diagram
+        3. **Network Security**: Evaluate network segmentation, VPC configuration, and traffic flow
+        4. **Data Protection**: Assess encryption, backup, and data handling practices
+        5. **Access Control**: Review IAM configurations and access patterns
+        6. **Monitoring**: Evaluate logging and monitoring capabilities
+
+        ## Response Format:
+        Provide structured JSON with:
+        - overall_score (1-10)
+        - security.score (1-10)
+        - security.issues (array of specific security concerns)
+        - security.recommendations (actionable improvement suggestions)
+
+        ## Response Style:
+        - Be specific and actionable
+        - Reference AWS service names
+        - Provide concrete remediation steps
+        - Consider operational impact
+        - Prioritize by severity (HIGH, MEDIUM, LOW)
+
+        Focus on practical, implementable security improvements that enhance the architecture's security posture.
+      IdleSessionTTLInSeconds: 1800
+      Tags:
+        Name: !Sub '${ProjectName}-SecurityAnalysis-Agent'
+        Environment: !Ref Environment
+        Project: !Ref ProjectName
+        Service: ai
+        AgentType: Security-Analysis
+        CostCenter: engineering
+        Owner: platform-team
+
+  # Bedrock Agent Alias (Default Test Alias)
+  SecurityAnalysisAgentAlias:
+    Type: AWS::Bedrock::AgentAlias
+    Properties:
+      AgentId: !Ref SecurityAnalysisAgent
+      AgentAliasName: !Sub '${Environment}-alias'
+      Description: !Sub 'Agent alias for ${Environment} environment'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-SecurityAnalysis-Alias-${Environment}'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Service
+          Value: ai
+        - Key: AliasType
+          Value: Environment-Specific
+        - Key: CostCenter
+          Value: engineering
+        - Key: Owner
+          Value: platform-team
+
+Outputs:
+  BedrockAgentId:
+    Description: 'ID of the Bedrock agent for security analysis'
+    Value: !Ref SecurityAnalysisAgent
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-BedrockAgentId'
+
+  BedrockAgentArn:
+    Description: 'ARN of the Bedrock agent'
+    Value: !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:agent/${SecurityAnalysisAgent}'
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-BedrockAgentArn'
+
+  BedrockAgentAliasId:
+    Description: 'ID of the Bedrock agent alias'
+    Value: !GetAtt SecurityAnalysisAgentAlias.AgentAliasId
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-BedrockAgentAliasId'
+
+  BedrockAgentRoleArn:
+    Description: 'ARN of the Bedrock agent IAM role'
+    Value: !GetAtt BedrockAgentRole.Arn
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-BedrockAgentRoleArn'
+
+  StackName:
+    Description: 'Name of this CloudFormation stack'
+    Value: !Ref 'AWS::StackName'
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-AIStackName'

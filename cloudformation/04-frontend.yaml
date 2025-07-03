@@ -1,0 +1,305 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'ArchLens Frontend Stack - CloudFront distribution and S3 hosting for React application'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: 'dev'
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: 'Deployment environment'
+  
+  ProjectName:
+    Type: String
+    Default: 'ArchLens'
+    Description: 'Project name for resource naming'
+
+  CustomDomainName:
+    Type: String
+    Default: ''
+    Description: 'Optional custom domain name (e.g., app.example.com). Leave empty to use CloudFront domain.'
+
+  CertificateArn:
+    Type: String
+    Default: ''
+    Description: 'Optional ACM certificate ARN for custom domain. Required if CustomDomainName is provided.'
+
+Conditions:
+  HasCustomDomain: !Not [!Equals [!Ref CustomDomainName, '']]
+  HasCertificate: !Not [!Equals [!Ref CertificateArn, '']]
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Environment Configuration"
+        Parameters:
+          - Environment
+          - ProjectName
+      - Label:
+          default: "Custom Domain (Optional)"
+        Parameters:
+          - CustomDomainName
+          - CertificateArn
+    ParameterLabels:
+      Environment:
+        default: "Deployment Environment"
+      ProjectName:
+        default: "Project Name"
+      CustomDomainName:
+        default: "Custom Domain Name"
+      CertificateArn:
+        default: "SSL Certificate ARN"
+
+Resources:
+  # S3 Bucket for Frontend Static Hosting
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'archlens-frontend-bucket-${AWS::AccountId}-${AWS::Region}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      VersioningConfiguration:
+        Status: Suspended
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: error.html
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - '*'
+            AllowedMethods:
+              - GET
+              - HEAD
+            AllowedOrigins:
+              - '*'
+            MaxAge: 3600
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-Frontend-Hosting-Bucket'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Service
+          Value: frontend
+        - Key: HostingType
+          Value: Static-Website
+        - Key: CostCenter
+          Value: engineering
+        - Key: Owner
+          Value: platform-team
+
+  # S3 Bucket Policy for CloudFront Access
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Statement:
+          - Sid: AllowCloudFrontOriginAccess
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub '${FrontendBucket}/*'
+            Condition:
+              StringEquals:
+                'AWS:SourceArn': !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}'
+          - Sid: AllowPublicRead
+            Effect: Allow
+            Principal: '*'
+            Action: s3:GetObject
+            Resource: !Sub '${FrontendBucket}/*'
+
+  # CloudFront Origin Access Control
+  OriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub '${ProjectName}-OAC-${Environment}'
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # CloudFront Distribution
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Aliases: !If 
+          - HasCustomDomain
+          - [!Ref CustomDomainName]
+          - !Ref 'AWS::NoValue'
+        Comment: !Sub 'ArchLens Frontend Distribution - ${Environment}'
+        DefaultCacheBehavior:
+          AllowedMethods:
+            - DELETE
+            - GET
+            - HEAD
+            - OPTIONS
+            - PATCH
+            - POST
+            - PUT
+          CachedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          Compress: true
+          DefaultTTL: 86400  # 1 day
+          MaxTTL: 31536000   # 1 year
+          MinTTL: 0
+          TargetOriginId: !Sub 'S3-${FrontendBucket}'
+          ViewerProtocolPolicy: redirect-to-https
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+        DefaultRootObject: index.html
+        Enabled: true
+        HttpVersion: http2
+        IPV6Enabled: true
+        Origins:
+          - DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            Id: !Sub 'S3-${FrontendBucket}'
+            S3OriginConfig:
+              OriginAccessIdentity: ''
+            OriginAccessControlId: !Ref OriginAccessControl
+        PriceClass: PriceClass_100  # Use only North America and Europe edge locations
+        ViewerCertificate: !If
+          - HasCertificate
+          - AcmCertificateArn: !Ref CertificateArn
+            SslSupportMethod: sni-only
+            MinimumProtocolVersion: TLSv1.2_2021
+          - CloudFrontDefaultCertificate: true
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 300
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 300
+        Logging:
+          Bucket: !GetAtt LoggingBucket.DomainName
+          IncludeCookies: false
+          Prefix: 'access-logs/'
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-CloudFront-Distribution'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Service
+          Value: cdn
+        - Key: DistributionType
+          Value: Web-Application
+        - Key: CostCenter
+          Value: engineering
+        - Key: Owner
+          Value: platform-team
+
+  # S3 Bucket for CloudFront Access Logs
+  LoggingBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'archlens-cloudfront-logs-${AWS::AccountId}-${AWS::Region}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: 'delete-old-logs'
+            Status: Enabled
+            ExpirationInDays: 90  # Keep logs for 90 days
+          - Id: 'transition-to-ia'
+            Status: Enabled
+            TransitionInDays: 30
+            StorageClass: STANDARD_IA
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-CloudFront-Logs-Bucket'
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: Service
+          Value: logging
+        - Key: LogType
+          Value: CloudFront-Access-Logs
+        - Key: CostCenter
+          Value: engineering
+        - Key: Owner
+          Value: platform-team
+
+  # Route 53 Record for Custom Domain (if provided)
+  Route53Record:
+    Type: AWS::Route53::RecordSet
+    Condition: HasCustomDomain
+    Properties:
+      HostedZoneId: !Sub '{{resolve:route53:hosted-zone-id:${CustomDomainName}}}'
+      Name: !Ref CustomDomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt CloudFrontDistribution.DomainName
+        HostedZoneId: Z2FDTNDATAQYW2  # CloudFront hosted zone ID
+        EvaluateTargetHealth: false
+
+Outputs:
+  FrontendBucketName:
+    Description: 'Name of the S3 bucket for frontend hosting'
+    Value: !Ref FrontendBucket
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-FrontendBucket'
+
+  FrontendBucketWebsiteURL:
+    Description: 'Website URL of the S3 bucket'
+    Value: !GetAtt FrontendBucket.WebsiteURL
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-FrontendBucketWebsiteURL'
+
+  CloudFrontDistributionId:
+    Description: 'ID of the CloudFront distribution'
+    Value: !Ref CloudFrontDistribution
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-CloudFrontDistributionId'
+
+  CloudFrontDistributionDomainName:
+    Description: 'Domain name of the CloudFront distribution'
+    Value: !GetAtt CloudFrontDistribution.DomainName
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-CloudFrontDomainName'
+
+  WebsiteURL:
+    Description: 'URL of the ArchLens application'
+    Value: !If
+      - HasCustomDomain
+      - !Sub 'https://${CustomDomainName}'
+      - !Sub 'https://${CloudFrontDistribution.DomainName}'
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-WebsiteURL'
+
+  LoggingBucketName:
+    Description: 'Name of the CloudFront access logs bucket'
+    Value: !Ref LoggingBucket
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-LoggingBucket'
+
+  StackName:
+    Description: 'Name of this CloudFormation stack'
+    Value: !Ref 'AWS::StackName'
+    Export:
+      Name: !Sub '${ProjectName}-${Environment}-FrontendStackName'

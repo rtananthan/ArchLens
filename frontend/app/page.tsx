@@ -1,72 +1,118 @@
-'use client'
+// ArchLens Frontend - Main Application Page
+// This is the primary user interface for the ArchLens application.
+// It manages the complete user workflow from file upload to analysis results.
 
+'use client'  // Next.js 14 directive for client-side rendering (required for React hooks)
+
+// React hooks for state management
 import { useState } from 'react'
+
+// UI icons from Lucide React (lightweight icon library)
 import { Shield, Github, ExternalLink } from 'lucide-react'
+
+// Reusable UI components from shadcn/ui component library
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { FileUpload } from '@/components/FileUpload'
-import { AnalysisProgress } from '@/components/AnalysisProgress'
-import { AnalysisResults } from '@/components/AnalysisResults'
-import { ArchitectureDescription } from '@/components/ArchitectureDescription'
-import { PillarAvailabilityNotice } from '@/components/PillarAvailabilityNotice'
-import { ThemeToggle } from '@/components/ThemeToggle'
+
+// Custom ArchLens components for specific functionality
+import { FileUpload } from '@/components/FileUpload'                    // Drag-and-drop file upload
+import { AnalysisProgress } from '@/components/AnalysisProgress'        // Real-time progress tracking
+import { AnalysisResults } from '@/components/AnalysisResults'          // Results visualization
+import { ArchitectureDescription } from '@/components/ArchitectureDescription'  // Component summary
+import { PillarAvailabilityNotice } from '@/components/PillarAvailabilityNotice'  // Feature notice
+import { ThemeToggle } from '@/components/ThemeToggle'                  // Dark/light mode toggle
+
+// API client for backend communication
 import { analysisApi } from '@/lib/api'
 
+// Application state machine - defines the different screens/phases of the app
+// This creates a clear workflow that users follow from start to finish
 type AppState = 'upload' | 'description' | 'analyzing' | 'results' | 'error'
 
 export default function Home() {
-  const [appState, setAppState] = useState<AppState>('upload')
-  const [analysisId, setAnalysisId] = useState<string>('')
-  const [error, setError] = useState<string>('')
-  const [isUploading, setIsUploading] = useState(false)
-  const [architectureDescription, setArchitectureDescription] = useState<string>('')
-  const [fileName, setFileName] = useState<string>('')
+  // State management for the application workflow
+  const [appState, setAppState] = useState<AppState>('upload')           // Current app phase
+  const [analysisId, setAnalysisId] = useState<string>('')               // Unique ID for tracking analysis
+  const [error, setError] = useState<string>('')                         // Error messages for user feedback
+  const [isUploading, setIsUploading] = useState(false)                  // Loading state during file upload
+  const [architectureDescription, setArchitectureDescription] = useState<string>('')  // AI-generated summary
+  const [fileName, setFileName] = useState<string>('')                   // Original filename for display
 
+  /**
+   * Handle file upload and initiate analysis workflow
+   * 
+   * This is the main entry point for user interaction. When a user selects
+   * a file, this function:
+   * 1. Updates UI to show loading state
+   * 2. Sends file to backend for processing
+   * 3. Handles the response and moves to next phase
+   * 4. Manages error states and user feedback
+   */
   const handleFileSelect = async (file: File) => {
+    // Set loading state and clear any previous errors
     setIsUploading(true)
     setError('')
-    setFileName(file.name)
+    setFileName(file.name)  // Store filename for display
 
     try {
+      // Call backend API to upload and analyze file
       const response = await analysisApi.analyzeFile(file)
-      setAnalysisId(response.analysis_id)
+      setAnalysisId(response.analysis_id)  // Store ID for future API calls
       
-      // If we got an immediate description, show it first
+      // Backend can provide immediate description of components found
       if (response.description) {
         setArchitectureDescription(response.description)
-        setAppState('description')
+        setAppState('description')  // Show description phase first
       } else {
-        // Otherwise go straight to analyzing
+        // If no immediate description, go straight to analysis
         setAppState('analyzing')
       }
     } catch (err) {
+      // Handle upload/analysis errors gracefully
       console.error('Upload failed:', err)
       setError('Failed to upload file. Please try again.')
       setAppState('error')
     } finally {
+      // Always reset loading state when done
       setIsUploading(false)
     }
   }
 
+  /**
+   * Handle successful completion of analysis
+   * Called by AnalysisProgress component when analysis finishes
+   */
   const handleAnalysisComplete = (id: string) => {
     setAnalysisId(id)
-    setAppState('results')
+    setAppState('results')  // Move to results display phase
   }
 
+  /**
+   * Handle analysis errors
+   * Called by AnalysisProgress component when analysis fails
+   */
   const handleAnalysisError = (errorMessage: string) => {
     setError(errorMessage)
-    setAppState('error')
+    setAppState('error')  // Show error state with message
   }
 
+  /**
+   * Reset application to initial state
+   * Allows users to start a new analysis from any phase
+   */
   const resetApp = () => {
-    setAppState('upload')
-    setAnalysisId('')
-    setError('')
-    setIsUploading(false)
-    setArchitectureDescription('')
-    setFileName('')
+    setAppState('upload')               // Back to upload phase
+    setAnalysisId('')                   // Clear analysis tracking
+    setError('')                        // Clear error messages
+    setIsUploading(false)               // Reset loading states
+    setArchitectureDescription('')      // Clear previous description
+    setFileName('')                     // Clear filename
   }
 
+  /**
+   * Transition from description phase to analysis phase
+   * User can review the component summary before proceeding
+   */
   const continueToAnalysis = () => {
     setAppState('analyzing')
   }
@@ -106,7 +152,7 @@ export default function Home() {
       {/* Main Content */}
       <main className="container mx-auto px-4 py-8">
         <div className="max-w-4xl mx-auto">
-          {/* Hero Section */}
+          {/* Hero Section - Main value proposition and feature highlights */}
           <div className="text-center mb-8">
             <h2 className="text-3xl font-bold mb-4">
               AI-Powered AWS Architecture Analysis
@@ -131,15 +177,17 @@ export default function Home() {
             </div>
           </div>
 
-          {/* App States */}
+          {/* Application State Rendering - shows different UI based on current phase */}
+          {/* Phase 1: File Upload - Initial state where users select files */}
           {appState === 'upload' && (
             <div className="space-y-6">
+              {/* Main file upload component with drag-and-drop functionality */}
               <FileUpload 
-                onFileSelect={handleFileSelect}
-                isUploading={isUploading}
+                onFileSelect={handleFileSelect}  // Callback when user selects file
+                isUploading={isUploading}        // Loading state for UI feedback
               />
               
-              {/* Pillar Availability Notice */}
+              {/* Notice about current feature availability */}
               <PillarAvailabilityNotice />
               
               {/* Features */}
@@ -183,12 +231,14 @@ export default function Home() {
             </div>
           )}
 
+          {/* Phase 2: Architecture Description - Shows AI-identified components */}
           {appState === 'description' && (
             <div className="space-y-6">
+              {/* Display component summary and allow user to proceed */}
               <ArchitectureDescription
-                description={architectureDescription}
-                fileName={fileName}
-                onContinue={continueToAnalysis}
+                description={architectureDescription}  // AI-generated component summary
+                fileName={fileName}                    // Original file name for context
+                onContinue={continueToAnalysis}        // Callback to proceed to analysis
               />
               
               <div className="text-center">
@@ -199,19 +249,22 @@ export default function Home() {
             </div>
           )}
 
+          {/* Phase 3: Analysis in Progress - Shows real-time progress */}
           {appState === 'analyzing' && (
             <div className="space-y-6">
+              {/* Show architecture description if available */}
               {architectureDescription && (
                 <ArchitectureDescription
-                  description={architectureDescription}
-                  fileName={fileName}
+                  description={architectureDescription}  // Component summary for context
+                  fileName={fileName}                    // File name for reference
                 />
               )}
               
+              {/* Real-time progress tracking with polling */}
               <AnalysisProgress
-                analysisId={analysisId}
-                onComplete={handleAnalysisComplete}
-                onError={handleAnalysisError}
+                analysisId={analysisId}               // ID for tracking this analysis
+                onComplete={handleAnalysisComplete}   // Callback when analysis finishes
+                onError={handleAnalysisError}         // Callback for error handling
               />
               
               <div className="text-center">
@@ -222,9 +275,11 @@ export default function Home() {
             </div>
           )}
 
+          {/* Phase 4: Results Display - Shows complete analysis results */}
           {appState === 'results' && (
             <div className="space-y-6">
-              <AnalysisResults analysisId={analysisId} />
+              {/* Comprehensive results with security scores and recommendations */}
+              <AnalysisResults analysisId={analysisId} />  {/* Fetches and displays full results */}
               
               <div className="text-center">
                 <Button onClick={resetApp}>
@@ -234,6 +289,7 @@ export default function Home() {
             </div>
           )}
 
+          {/* Phase 5: Error State - Shows user-friendly error messages */}
           {appState === 'error' && (
             <Card>
               <CardContent className="p-8 text-center">
@@ -242,6 +298,7 @@ export default function Home() {
                     Something went wrong
                   </h3>
                   <p className="text-muted-foreground">
+                    {/* Display specific error message or generic fallback */}
                     {error || 'An unexpected error occurred. Please try again.'}
                   </p>
                   <Button onClick={resetApp}>

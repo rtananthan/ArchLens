@@ -81,3 +81,11 @@ logs/
 
 # CDK
 cdk.out
+
+# Enterprise/Internal Documents (sensitive info)
+AWS_ENTERPRISE_PERMISSIONS_REQUEST.md
+AWS_BEDROCK_QUOTA_INCREASE_GUIDE.md
+*PERMISSIONS_REQUEST*
+*QUOTA_INCREASE*
+enterprise-docs/
+internal-docs/
