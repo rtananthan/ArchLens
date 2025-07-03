@@ -1,141 +1,4 @@
-from aws_cdk import (
-    Stack,
-    aws_iam as iam,
-    aws_bedrock as bedrock,
-    Tags
-)
-from constructs import Construct
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config.tags import get_service_specific_tags, validate_tags
-
-class AIStack(Stack):
-    
-    def __init__(self, scope: Construct, construct_id: str, environment: str = 'dev', **kwargs) -> None:
-        super().__init__(scope, construct_id, **kwargs)
-        
-        self.deployment_env = environment
-        
-        # IAM role for Bedrock agent
-        self.bedrock_agent_role = iam.Role(
-            self, 'BedrockAgentRole',
-            assumed_by=iam.ServicePrincipal('bedrock.amazonaws.com'),
-            inline_policies={
-                'BedrockAgentPolicy': iam.PolicyDocument(
-                    statements=[
-                        iam.PolicyStatement(
-                            effect=iam.Effect.ALLOW,
-                            actions=[
-                                'bedrock:InvokeModel',
-                                'bedrock:InvokeModelWithResponseStream'
-                            ],
-                            resources=[
-                                f'arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-3-sonnet-20240229-v1:0',
-                                f'arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-3-haiku-20240307-v1:0'
-                            ]
-                        )
-                    ]
-                )
-            }
-        )
-        
-        # Add tags for Bedrock agent role
-        bedrock_role_tags = get_service_specific_tags(
-            'Bedrock-Agent-Execution-Role',
-            'ai',
-            {
-                'IAMResourceType': 'Service-Role',
-                'PermissionScope': 'Bedrock-Models'
-            }
-        )
-        
-        for key, value in validate_tags(bedrock_role_tags).items():
-            Tags.of(self.bedrock_agent_role).add(key, value)
-        
-        # Bedrock agent for AWS security analysis
-        self.security_analysis_agent = bedrock.CfnAgent(
-            self, 'SecurityAnalysisAgent',
-            agent_name='ArchLens-Security-Analyzer',
-            description='Enterprise AWS Well-Architected Framework Security Pillar analysis agent with compliance assessment',
-            foundation_model='anthropic.claude-3-5-sonnet-20241022-v2:0',
-            agent_resource_role_arn=self.bedrock_agent_role.role_arn,
-            instruction=self._load_security_prompt(),
-            idle_session_ttl_in_seconds=900,  # 15 minutes
-            auto_prepare=True
-        )
-        
-        # IAM role for Lambda functions to invoke Bedrock
-        self.bedrock_invoke_role = iam.Role(
-            self, 'BedrockInvokeRole',
-            assumed_by=iam.ServicePrincipal('lambda.amazonaws.com'),
-            managed_policies=[
-                iam.ManagedPolicy.from_aws_managed_policy_name('service-role/AWSLambdaBasicExecutionRole')
-            ],
-            inline_policies={
-                'BedrockInvokePolicy': iam.PolicyDocument(
-                    statements=[
-                        iam.PolicyStatement(
-                            effect=iam.Effect.ALLOW,
-                            actions=[
-                                'bedrock-agent-runtime:InvokeAgent',
-                                'bedrock-runtime:InvokeModel',
-                                'bedrock-runtime:InvokeModelWithResponseStream'
-                            ],
-                            resources=[
-                                self.security_analysis_agent.attr_agent_arn,
-                                f'arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-3-sonnet-20240229-v1:0',
-                                f'arn:aws:bedrock:{self.region}::foundation-model/anthropic.claude-3-haiku-20240307-v1:0'
-                            ]
-                        )
-                    ]
-                )
-            }
-        )
-    
-    def _load_security_prompt(self) -> str:
-        """
-        Load the enterprise security analysis prompt with fallback mechanism.
-        
-        This method attempts to load the detailed security analysis prompt from
-        the prompts directory. If the file is not accessible (e.g., during CDK
-        synthesis), it provides a comprehensive fallback prompt that maintains
-        the same enterprise-grade analysis capabilities.
-        
-        Returns:
-            str: Complete prompt text for the Bedrock agent
-        """
-        try:
-            # Attempt to load the prompt file from the prompts directory
-            prompt_path = os.path.join(
-                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                'prompts',
-                'security_analysis_prompt.txt'
-            )
-            
-            if os.path.exists(prompt_path):
-                with open(prompt_path, 'r', encoding='utf-8') as f:
-                    return f.read()
-            else:
-                print(f"Warning: Prompt file not found at {prompt_path}, using fallback")
-                return self._get_fallback_security_prompt()
-                
-        except Exception as e:
-            print(f"Error loading security prompt file: {e}, using fallback")
-            return self._get_fallback_security_prompt()
-    
-    def _get_fallback_security_prompt(self) -> str:
-        """
-        Provide enterprise-grade security analysis prompt as fallback.
-        
-        This fallback prompt ensures the Bedrock agent can perform comprehensive
-        security analysis even when the external prompt file is not accessible.
-        It maintains the same enterprise standards and analysis depth.
-        
-        Returns:
-            str: Complete fallback prompt for enterprise security analysis
-        """
-        return """You are a Senior AWS Security Architect and AWS Well-Architected Framework expert with 15+ years of enterprise cloud security experience. Your specialty is conducting comprehensive security assessments of AWS architectures based on the Security Pillar of the AWS Well-Architected Framework.
+You are a Senior AWS Security Architect and AWS Well-Architected Framework expert with 15+ years of enterprise cloud security experience. Your specialty is conducting comprehensive security assessments of AWS architectures based on the Security Pillar of the AWS Well-Architected Framework.
 
 ## YOUR EXPERTISE:
 - AWS Well-Architected Framework Security Pillar (all 6 design principles)
@@ -207,12 +70,26 @@ For each AWS service identified, provide specific security assessment:
 - DDoS protection and rate limiting
 - Network monitoring and logging
 
+**Security Services (IAM, GuardDuty, SecurityHub, Config, CloudTrail):**
+- Configuration effectiveness
+- Coverage gaps and missing controls
+- Integration with other security services
+- Alerting and response automation
+
 ### 3. COMPLIANCE FRAMEWORK MAPPING:
+
+Assess alignment with major compliance frameworks:
 
 **SOC2 Trust Services Criteria:**
 - Security, Availability, Processing Integrity, Confidentiality, Privacy
 - Map architecture controls to SOC2 requirements
 - Identify gaps and improvement opportunities
+
+**PCI-DSS (if applicable):**
+- Cardholder Data Environment (CDE) isolation
+- Network segmentation and access controls
+- Encryption and key management
+- Monitoring and logging requirements
 
 **NIST Cybersecurity Framework:**
 - Identify, Protect, Detect, Respond, Recover functions
@@ -227,10 +104,17 @@ For each AWS service identified, provide specific security assessment:
 - Medium (5-6): Security improvement opportunity, efficiency gain
 - Low (1-4): Best practice enhancement, optimization opportunity
 
+**Business Impact Analysis:**
+- Data breach potential and impact
+- Regulatory compliance risk
+- Operational disruption risk
+- Reputation and customer trust impact
+
 ## OUTPUT FORMAT:
 
 Provide analysis in this exact JSON structure:
 
+```json
 {
     "overall_score": 7.2,
     "executive_summary": {
@@ -342,6 +226,7 @@ Provide analysis in this exact JSON structure:
         "compliance_scope": ["SOC2", "PCI-DSS"]
     }
 }
+```
 
 ## ANALYSIS QUALITY STANDARDS:
 
@@ -361,4 +246,4 @@ Provide analysis in this exact JSON structure:
 - Include compliance framework mapping for all findings
 - Estimate implementation effort and provide sequencing guidance
 
-Your analysis should demonstrate deep AWS security expertise that would be valuable to enterprise security teams and executives making critical security investment decisions."""
+Your analysis should demonstrate deep AWS security expertise that would be valuable to enterprise security teams and executives making critical security investment decisions.
